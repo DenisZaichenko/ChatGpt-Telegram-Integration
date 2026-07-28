@@ -1,0 +1,39 @@
+{
+  "name": "codex-telegram-remote",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "codex-telegram-remote": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "doctor": "tsx src/index.ts doctor",
+    "hash-pairing": "tsx src/hash-pairing.ts",
+    "generate:protocol": "codex app-server generate-ts --out generated",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@node-rs/argon2": "2.0.2",
+    "better-sqlite3": "12.6.2",
+    "grammy": "1.38.3",
+    "pino": "9.14.0",
+    "smol-toml": "1.6.0",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "7.6.13",
+    "@types/node": "24.10.13",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3",
+    "vitest": "4.0.18"
+  },
+  "packageManager": "pnpm@11.9.0"
+}

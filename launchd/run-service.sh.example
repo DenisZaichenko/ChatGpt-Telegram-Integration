@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+# Copy this file to a private installation directory and replace both paths.
+# The environment file must be owned by you and mode 0600.
+set -a
+. "/absolute/private/path/codex-telegram-remote.env"
+set +a
+exec "/absolute/path/to/node" "/absolute/path/to/codex-telegram-remote/dist/index.js"

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.local.codex-telegram-remote</string>
+  <key>ProgramArguments</key>
+  <array><string>/absolute/private/path/run-service.sh</string></array>
+  <key>WorkingDirectory</key><string>/absolute/path/to/codex-telegram-remote</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>CONFIG_FILE</key><string>/absolute/path/to/config.toml</string></dict>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/absolute/private/data/service.stdout.log</string>
+  <key>StandardErrorPath</key><string>/absolute/private/data/service.stderr.log</string>
+</dict>
+</plist>

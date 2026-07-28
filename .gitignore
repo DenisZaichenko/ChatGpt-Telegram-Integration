@@ -1,0 +1,14 @@
+node_modules/
+dist/
+generated/
+.env
+config.toml
+launchd/com.local.codex-telegram-remote.plist
+launchd/run-service.sh
+*.db
+*.db-shm
+*.db-wal
+*.log
+data/
+coverage/
+.DS_Store

@@ -1,0 +1,13 @@
+# Non-secret configuration. Environment variables override these values.
+allowed_user_id = 123456789
+codex_bin = "/absolute/path/to/codex"
+codex_home = "/Users/me/.codex"
+data_dir = "/Users/me/Library/Application Support/codex-telegram-remote"
+project_roots = ["/Users/me/project-a"]
+project_parent_dirs = ["/Users/me/IdeaProjects"]
+project_discovery_depth = 1
+max_concurrent_turns = 3
+log_level = "info"
+
+[project_aliases]
+project-a = "/Users/me/project-a"
