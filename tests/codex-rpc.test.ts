@@ -15,7 +15,7 @@ function fixture(): { config: Config; transcript: string } {
   const transcript = path.join(dir, "transcript.jsonl");
   fs.writeFileSync(executable, `#!/usr/bin/env node
 const fs = require("node:fs");
-if (process.argv.includes("--version")) { process.stdout.write("codex-cli 0.144.6\\n"); process.exit(0); }
+if (process.argv.includes("--version")) { process.stdout.write("codex-cli 0.145.0\\n"); process.exit(0); }
 const readline = require("node:readline");
 let initialized = false;
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");

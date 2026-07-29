@@ -125,7 +125,7 @@ export class TurnCoordinator {
   async steer(chatId: string, text: string): Promise<void> {
     const active = this.store.activeTurn(chatId);
     if (!active || !this.owned.has(turnKey(chatId, active.turnId))) throw new Error("No bot-owned turn is active in this chat");
-    await this.rpc.request("turn/steer", { threadId: chatId, input: [{ type: "text", text }], expectedTurnId: active.turnId });
+    await this.rpc.request("turn/steer", { threadId: chatId, input: [{ type: "text", text, text_elements: [] }], expectedTurnId: active.turnId });
   }
 
   async stop(chatId: string): Promise<void> {
@@ -195,7 +195,7 @@ export class TurnCoordinator {
       await this.rpc.request("thread/resume", { threadId: chat.id });
       const response = object(await this.rpc.request("turn/start", {
         threadId: chat.id,
-        input: [{ type: "text", text }],
+        input: [{ type: "text", text, text_elements: [] }],
         cwd,
         approvalPolicy: fullAccess ? "never" : "on-request",
         sandboxPolicy: fullAccess

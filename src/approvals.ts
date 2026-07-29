@@ -182,7 +182,7 @@ export function approvalDecision(kind: string, action: string, payload: Record<s
   if (kind === "permissions") return action === "accept" || action === "acceptForSession"
     ? { permissions: object(payload.permissions), scope: action === "acceptForSession" ? "session" : "turn" }
     : { permissions: {}, scope: "turn" };
-  if (kind === "elicitation") return { action: action === "accept" ? "accept" : action === "cancel" ? "cancel" : "decline", content: null };
+  if (kind === "elicitation") return { action: action === "accept" ? "accept" : action === "cancel" ? "cancel" : "decline", content: null, _meta: null };
   return { decision: action };
 }
 
