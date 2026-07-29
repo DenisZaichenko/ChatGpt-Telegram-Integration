@@ -11,6 +11,8 @@ interface BufferState {
   parts: Map<string, string>;
   plan: string | null;
   progressMessageId: number | null;
+  draftId: number;
+  keepAlive: NodeJS.Timeout | null;
   timer: NodeJS.Timeout | null;
   flushPromise: Promise<void> | null;
   dirty: boolean;
@@ -18,8 +20,12 @@ interface BufferState {
   finalText: string | null;
 }
 
+/** A streamed draft is a 30-second ephemeral preview, so it has to be re-sent while the turn is still producing nothing new. */
+const DRAFT_KEEPALIVE_MS = 20_000;
+
 export class OutputCoalescer {
   private readonly buffers = new Map<string, BufferState>();
+  private streamDrafts = true;
 
   constructor(private readonly store: StateStore, private readonly telegram: TelegramDelivery, private readonly logger: Logger, private readonly labelFor: (chat: CodexChat) => string) {}
 
@@ -79,9 +85,10 @@ export class OutputCoalescer {
     const enriched = { ...params, turnId: turn.id };
     const state = this.state(enriched, telegramChatId);
     if (state.timer) { clearTimeout(state.timer); state.timer = null; }
+    if (state.keepAlive) { clearTimeout(state.keepAlive); state.keepAlive = null; }
     if (state.flushPromise) await state.flushPromise;
     state.dirty = false;
-    if (this.store.turnFinalDelivered(state.chatId, state.turnId)) { this.buffers.delete(key(state.chatId, state.turnId)); return; }
+    if (this.store.turnFinalDelivered(state.chatId, state.turnId)) { this.discard(state); return; }
 
     for (const raw of Array.isArray(turn.items) ? turn.items : []) {
       const item = object(raw);
@@ -103,7 +110,7 @@ export class OutputCoalescer {
     if (finalMessageId !== null) this.store.setTurnMessage(state.chatId, state.turnId, "final", finalMessageId);
     const terminalState = status === "failed" ? "failed" : status === "interrupted" ? "interrupted" : "completed";
     this.store.updateTurn(state.chatId, state.turnId, terminalState, { completedAt: Date.now(), terminalError: error == null ? null : String(error) });
-    this.buffers.delete(key(state.chatId, state.turnId));
+    this.discard(state);
   }
 
   async warning(chatId: string, turnId: string, telegramChatId: number, message: string): Promise<void> {
@@ -121,7 +128,7 @@ export class OutputCoalescer {
     if (!state) {
       const chat = this.store.getChat(chatId);
       if (!chat) throw new Error("Turn event references an unindexed chat");
-      state = { chatId, turnId, telegramChatId, prefix: this.labelFor(chat), parts: new Map(), plan: null, progressMessageId: null, timer: null, flushPromise: null, dirty: false, lastEditAt: 0, finalText: null };
+      state = { chatId, turnId, telegramChatId, prefix: this.labelFor(chat), parts: new Map(), plan: null, progressMessageId: null, draftId: draftIdFor(turnId), keepAlive: null, timer: null, flushPromise: null, dirty: false, lastEditAt: 0, finalText: null };
       this.buffers.set(id, state);
     }
     return state;
@@ -130,7 +137,9 @@ export class OutputCoalescer {
   private schedule(state: BufferState): void {
     state.dirty = true;
     if (state.timer || state.flushPromise) return;
-    const delay = state.progressMessageId === null ? 0 : Math.max(0, 1_500 - (Date.now() - state.lastEditAt));
+    // Keyed off lastEditAt rather than progressMessageId: when streaming drafts there
+    // is never a progress message, so the latter would disable throttling entirely.
+    const delay = state.lastEditAt === 0 ? 0 : Math.max(0, 1_500 - (Date.now() - state.lastEditAt));
     state.timer = setTimeout(() => {
       state.timer = null;
       state.dirty = false;
@@ -147,6 +156,21 @@ export class OutputCoalescer {
     const body = [state.plan ? `Plan\n${state.plan}` : "", ...state.parts.values()].filter(Boolean).join("\n\n");
     const chunks = chunkText(body);
     if (!chunks.length) return;
+
+    // While the turn runs, stream into a draft: it leaves nothing behind, so the
+    // turn produces exactly one persisted message instead of a progress message
+    // plus a final one. Only the newest chunk is previewed; complete() still
+    // delivers the whole body.
+    if (this.streamDrafts && state.progressMessageId === null) {
+      const tail = chunks.length > 1 ? `…\n${chunks.at(-1)!}` : chunks[0]!;
+      if (await this.telegram.sendDraft(state.telegramChatId, state.draftId, `${state.prefix}\n${tail}`)) {
+        state.lastEditAt = Date.now();
+        this.armKeepAlive(state);
+        return;
+      }
+      this.streamDrafts = false;
+    }
+
     const text = `${state.prefix}\n${chunks[0]}`;
     if (state.progressMessageId === null) {
       state.progressMessageId = await this.telegram.sendText(state.telegramChatId, text);
@@ -155,6 +179,30 @@ export class OutputCoalescer {
     for (const chunk of chunks.slice(1)) await this.telegram.sendText(state.telegramChatId, `${state.prefix}\n${chunk}`);
     state.lastEditAt = Date.now();
   }
+
+  /** Re-sends the draft before its 30-second preview lapses, so a quiet stretch mid-turn does not blank the stream. */
+  private armKeepAlive(state: BufferState): void {
+    if (state.keepAlive) clearTimeout(state.keepAlive);
+    state.keepAlive = setTimeout(() => {
+      state.keepAlive = null;
+      if (!this.buffers.has(key(state.chatId, state.turnId))) return;
+      this.schedule(state);
+    }, DRAFT_KEEPALIVE_MS);
+    state.keepAlive.unref?.();
+  }
+
+  private discard(state: BufferState): void {
+    if (state.keepAlive) { clearTimeout(state.keepAlive); state.keepAlive = null; }
+    if (state.timer) { clearTimeout(state.timer); state.timer = null; }
+    this.buffers.delete(key(state.chatId, state.turnId));
+  }
+}
+
+/** Draft ids must be non-zero, and stable across a turn so Telegram animates updates instead of stacking previews. */
+export function draftIdFor(turnId: string): number {
+  let hash = 0;
+  for (const character of turnId) hash = (Math.imul(hash, 31) + character.charCodeAt(0)) | 0;
+  return (hash & 0x7fffffff) || 1;
 }
 
 function key(chatId: string, turnId: string): string { return `${chatId}\0${turnId}`; }

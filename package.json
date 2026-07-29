@@ -23,7 +23,7 @@
   "dependencies": {
     "@node-rs/argon2": "2.0.2",
     "better-sqlite3": "12.6.2",
-    "grammy": "1.38.3",
+    "grammy": "1.45.1",
     "pino": "9.14.0",
     "smol-toml": "1.6.0",
     "zod": "4.3.6"

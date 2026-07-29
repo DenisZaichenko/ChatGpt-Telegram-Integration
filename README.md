@@ -38,6 +38,8 @@ For custom providers that need environment secrets, name only the required varia
 
 `/projects`, `/project`, `/chats [all]`, `/find`, `/use`, `/new`, `/where`, `/history`, `/status`, `/stop`, `/steer`, `/diff`, `/fullaccess on|off`, and `/help` are implemented. Plain text starts a turn, or queues the next turn when the selected chat is busy.
 
+While a turn runs, progress is streamed with Bot API `sendMessageDraft` (Bot API 10.0+) rather than posted as messages. A draft is an ephemeral 30-second preview that leaves nothing in history, so a turn persists exactly one message: the final answer. Drafts are re-sent every 20 seconds to outlive that window during quiet stretches, and updates are throttled to at most one per 1.5 seconds. Only the newest chunk is previewed when output exceeds one message; the final message carries the whole body. If the Bot API rejects drafts with `404`, the service falls back for the rest of the process to the previous behaviour — one progress message, edited in place.
+
 Approval prompts offer `Allow once`, `Allow for session` for the current Codex session, and a confirmed per-chat `Enable full access` mode. Full access applies to future Telegram-started turns, uses Codex `dangerFullAccess` with approval policy `never`, and therefore grants the agent the same filesystem and network reach as the macOS user. Use `/fullaccess off` to return future turns to workspace-write with approvals. Managed Codex policy remains authoritative and can reject the requested mode.
 
 ## Service installation

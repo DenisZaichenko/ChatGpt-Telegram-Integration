@@ -63,6 +63,8 @@ export interface TelegramDelivery {
   sendText(chatId: number, text: string, options?: TelegramTextOptions): Promise<number>;
   editText(chatId: number, messageId: number, text: string, options?: TelegramTextOptions): Promise<void>;
   sendDocument(chatId: number, filename: string, body: Buffer, caption: string): Promise<number>;
+  /** Streams an ephemeral draft preview of a message still being generated. Resolves false when the Bot API rejects drafts, so the caller can fall back to editing a real progress message. */
+  sendDraft(chatId: number, draftId: number, text: string): Promise<boolean>;
 }
 
 export interface TelegramTextOptions {
