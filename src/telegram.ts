@@ -12,7 +12,28 @@ import { CodexRpcClient } from "./codex-rpc.js";
 import { telegramHtml } from "./telegram-format.js";
 
 export class GrammyGateway implements TelegramDelivery {
+  private draftsSupported = true;
+
   constructor(readonly bot: Bot, private readonly logger: Logger, private readonly store: StateStore) {}
+
+  async sendDraft(chatId: number, draftId: number, text: string): Promise<boolean> {
+    if (!this.draftsSupported) return false;
+    try {
+      await this.bot.api.sendMessageDraft(chatId, draftId, telegramHtml(text), { parse_mode: "HTML" });
+      return true;
+    } catch (error) {
+      if (error instanceof GrammyError && error.description.includes("parse entities")) {
+        await this.bot.api.sendMessageDraft(chatId, draftId, text);
+        return true;
+      }
+      if (error instanceof GrammyError && (error.error_code === 404 || /method not found|unknown method/i.test(error.description))) {
+        this.draftsSupported = false;
+        this.logger.warn({ description: error.description }, "Bot API rejected message drafts; falling back to edited progress messages");
+        return false;
+      }
+      throw error;
+    }
+  }
 
   async sendText(chatId: number, text: string, options: TelegramTextOptions = {}): Promise<number> {
     const outbox = options.idempotencyKey ? this.store.prepareOutbox(options.idempotencyKey, "sendMessage", { chatId, text }) : null;

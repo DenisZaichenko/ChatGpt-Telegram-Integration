@@ -15,8 +15,8 @@ importers:
         specifier: 12.6.2
         version: 12.6.2
       grammy:
-        specifier: 1.38.3
-        version: 1.38.3
+        specifier: 1.45.1
+        version: 1.45.1
       pino:
         specifier: 9.14.0
         version: 9.14.0
@@ -366,8 +366,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@grammyjs/types@3.22.2':
-    resolution: {integrity: sha512-uu7DX2ezhnBPozL3bXHmwhLvaFsh59E4QyviNH4Cij7EdVekYrs6mCzeXsa2pDk30l3uXo7DBahlZLzTPtpYZg==}
+  '@grammyjs/types@4.0.0':
+    resolution: {integrity: sha512-Z8lDLTvOlo12e5Vnly/vQh3JC9ppaitS1dGZ3w068gNitOd/y8tTSiib+Xm38aBGbtYGmUZwOc6afYrLs2CSTg==}
 
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
@@ -770,8 +770,8 @@ packages:
   github-from-package@0.0.0:
     resolution: {integrity: sha512-SyHy3T1v2NUXn29OsWdxmK6RwHD+vkj3v8en8AOBZ1wBQ/hCAQ5bAQTD02kW4W9tUp/3Qh6J8r9EvntiyCmOOw==}
 
-  grammy@1.38.3:
-    resolution: {integrity: sha512-1eQwNfxrRQ0JOFqd3n1nKqyWkHvCQRCNiH8e5aYm27mIjGPobgss58XN8GORC2ejAWM2+NSdUknrMhYj87cjGg==}
+  grammy@1.45.1:
+    resolution: {integrity: sha512-Y4VL/hqJMZZxwlUr5ZgM68CFu2iIeEkNLR1cY3+Ww68CIvWARDsoXFix7+31rmyC0+7L85ZI+Pq3E5JSG5+nLQ==}
     engines: {node: ^12.20.0 || >=14.13.1}
 
   ieee754@1.2.1:
@@ -1254,7 +1254,7 @@ snapshots:
   '@esbuild/win32-x64@0.28.1':
     optional: true
 
-  '@grammyjs/types@3.22.2': {}
+  '@grammyjs/types@4.0.0': {}
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
@@ -1603,9 +1603,9 @@ snapshots:
 
   github-from-package@0.0.0: {}
 
-  grammy@1.38.3:
+  grammy@1.45.1:
     dependencies:
-      '@grammyjs/types': 3.22.2
+      '@grammyjs/types': 4.0.0
       abort-controller: 3.0.0
       debug: 4.4.3
       node-fetch: 2.7.0
