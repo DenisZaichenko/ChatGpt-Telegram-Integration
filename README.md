@@ -48,4 +48,4 @@ Copy and edit `launchd/run-service.sh.example`, keeping its referenced environme
 
 The version-matched app-server TypeScript schema is in `generated/` and can be refreshed with `pnpm generate:protocol`. Tests use fakes and never access the developer's real Codex store.
 
-This release fails closed outside the generated/tested Codex CLI range `>=0.144.6 <0.145.0`. Regenerate the protocol types and update contract tests before widening that range.
+This release fails closed outside the generated/tested Codex CLI range `>=0.145.0 <0.146.0`. Regenerate the protocol types and update contract tests before widening that range.

@@ -17,7 +17,8 @@ interface PendingCall {
 
 const BACKOFF_SECONDS = [1, 2, 5, 10, 30];
 const execFileAsync = promisify(execFile);
-export const TESTED_CODEX_VERSION = { major: 0, minor: 144, minimumPatch: 6 } as const;
+export const TESTED_CODEX_VERSION = { major: 0, minor: 145, minimumPatch: 0 } as const;
+const TESTED_CODEX_RANGE = `>=${TESTED_CODEX_VERSION.major}.${TESTED_CODEX_VERSION.minor}.${TESTED_CODEX_VERSION.minimumPatch} <${TESTED_CODEX_VERSION.major}.${TESTED_CODEX_VERSION.minor + 1}.0`;
 
 export class CodexRpcClient extends EventEmitter {
   private child: ChildProcessWithoutNullStreams | null = null;
@@ -97,7 +98,7 @@ export class CodexRpcClient extends EventEmitter {
     try {
       const initialize = this.requestBeforeInitialized("initialize", {
         clientInfo: { name: "codex_telegram_remote", title: "Codex Telegram Remote", version: this.version },
-        capabilities: { experimentalApi: true },
+        capabilities: { experimentalApi: true, requestAttestation: false },
       });
       await initialize;
       this.write({ method: "initialized", params: {} });
@@ -118,7 +119,7 @@ export class CodexRpcClient extends EventEmitter {
     if (!match) throw new Error("Unable to parse Codex CLI version");
     const [, major, minor, patch] = match.map(Number);
     if (major !== TESTED_CODEX_VERSION.major || minor !== TESTED_CODEX_VERSION.minor || patch! < TESTED_CODEX_VERSION.minimumPatch) {
-      throw new Error(`Unsupported Codex CLI ${major}.${minor}.${patch}; tested range is >=0.144.6 <0.145.0`);
+      throw new Error(`Unsupported Codex CLI ${major}.${minor}.${patch}; tested range is ${TESTED_CODEX_RANGE}`);
     }
   }
 
