@@ -194,6 +194,7 @@ export class TelegramController {
       await this.openChat(chatId, chat);
     } else if (action === "new") await this.createForProject(chatId, Number(value));
     else if (action === "chats") await this.showChats(chatId, value === "all", Number(extra ?? 0));
+    else if (action === "projects") await this.showProjects(chatId, Number(value ?? 0));
     else if (action === "search") {
       this.store.setInputMode({ userId, kind: "chat_search", targetId: null, expiresAt: Date.now() + 30 * 60_000, payload: {} });
       await this.gateway.sendText(chatId, "Send the text to search for. Your next non-command message will be used as the search query.");
@@ -258,11 +259,18 @@ export class TelegramController {
     else await this.gateway.sendText(chatId, "[no project / no chat]\nCodex Telegram Remote is ready.", { replyMarkup: mainKeyboard() });
   }
 
-  private async showProjects(chatId: number): Promise<void> {
+  private async showProjects(chatId: number, offset = 0): Promise<void> {
     const selected = this.store.selectedProject();
     const projects = this.store.listProjects();
-    const buttons = projects.map((project) => [this.uiButton(chatId, `${project.id === selected?.id ? "✓ " : ""}${project.alias} · ${abbreviate(project.canonicalPath)} · ${this.store.listChats(project.id, 10_000).length} chats`, "project", project.id)]);
-    await this.gateway.sendText(chatId, "Projects", { replyMarkup: { inline_keyboard: buttons } });
+    const pageSize = 10;
+    const { visible, safeOffset, hasPrevious, hasNext } = pageWindow(projects, offset, pageSize);
+    const buttons = visible.map((project) => [this.uiButton(chatId, `${project.id === selected?.id ? "✓ " : ""}${project.alias} · ${abbreviate(project.canonicalPath)} · ${this.store.listChats(project.id, 10_000).length} chats`, "project", project.id)]);
+    const nav: { text: string; callback_data: string }[] = [];
+    if (hasPrevious) nav.push(this.uiButton(chatId, "Previous", "projects", safeOffset - pageSize));
+    if (hasNext) nav.push(this.uiButton(chatId, "Next", "projects", safeOffset + pageSize));
+    if (nav.length) buttons.push(nav);
+    const suffix = projects.length > pageSize ? `\nShowing ${safeOffset + 1}–${safeOffset + visible.length} of ${projects.length}.` : "";
+    await this.gateway.sendText(chatId, `Projects${suffix}`, { replyMarkup: { inline_keyboard: buttons } });
   }
 
   private async selectProjectAlias(chatId: number, alias: string): Promise<void> {
@@ -296,22 +304,31 @@ export class TelegramController {
     const q = query.toLowerCase();
     const projects = this.store.listProjects().filter((project) => project.alias.includes(q) || project.canonicalPath.toLowerCase().includes(q));
     const chats = this.store.findChats(query);
+    const shownProjects = projects.slice(0, 10);
+    const shownChats = chats.slice(0, 10);
     const buttons = [
       [this.uiButton(chatId, "🔎 Search again", "search")],
-      ...projects.map((project) => [this.uiButton(chatId, `Project: ${project.alias}`, "project", project.id)]),
-      ...chats.map((chat) => [
+      ...shownProjects.map((project) => [this.uiButton(chatId, `Project: ${project.alias}`, "project", project.id)]),
+      ...shownChats.map((chat) => [
         this.uiButton(chatId, `${chatIndicators(chat, this.store)}Chat: ${truncate(chat.title || chat.preview || shortId(chat.id), 37)}`, "chat", chat.id),
         this.uiButton(chatId, this.store.isFavorite(chat.id) ? "★" : "☆", "favorite", chat.id, "all:0"),
       ]),
     ];
-    await this.gateway.sendText(chatId, `Search results: ${projects.length + chats.length}`, { replyMarkup: { inline_keyboard: buttons } });
+    const hidden = (projects.length - shownProjects.length) + (chats.length - shownChats.length);
+    const suffix = hidden ? `\nShowing ${shownProjects.length} project(s) and ${shownChats.length} chat(s); ${hidden} more not shown. Narrow the search.` : "";
+    await this.gateway.sendText(chatId, `Search results: ${projects.length + chats.length}${suffix}`, { replyMarkup: { inline_keyboard: buttons } });
   }
 
   private async useShortId(chatId: number, id: string): Promise<void> {
     const matches = this.store.resolveShortId(id);
     if (matches.length !== 1) {
-      const buttons = matches.map((chat) => [this.uiButton(chatId, `${this.store.getProject(chat.projectId)?.alias}: ${truncate(chat.title || chat.preview || chat.id, 40)}`, "chat", chat.id)]);
-      await this.gateway.sendText(chatId, matches.length ? "That id is ambiguous. Select a chat:" : "No matching chat.", { replyMarkup: { inline_keyboard: buttons } });
+      const shown = matches.slice(0, 10);
+      const buttons = shown.map((chat) => [this.uiButton(chatId, `${this.store.getProject(chat.projectId)?.alias}: ${truncate(chat.title || chat.preview || chat.id, 40)}`, "chat", chat.id)]);
+      const hidden = matches.length - shown.length;
+      const heading = matches.length
+        ? `That id is ambiguous. Select a chat:${hidden ? `\nShowing ${shown.length} of ${matches.length}; use a longer id.` : ""}`
+        : "No matching chat.";
+      await this.gateway.sendText(chatId, heading, { replyMarkup: { inline_keyboard: buttons } });
       return;
     }
     await this.openChat(chatId, matches[0]!);
@@ -535,6 +552,17 @@ export function parseCommand(text: string): [string, string] | null {
 
 export function isAuthorizedPrivate(allowedUserId: number, fromId: number, chatId: number, chatType: string): boolean {
   return fromId === allowedUserId && chatType === "private" && chatId === fromId;
+}
+
+/** Clamps a requested offset onto a real page boundary. Telegram rejects reply markup past roughly 10 KB, so button lists must be paged rather than sent whole. */
+export function pageWindow<T>(items: T[], offset: number, pageSize: number): { visible: T[]; safeOffset: number; hasPrevious: boolean; hasNext: boolean } {
+  const safeOffset = Math.max(0, Math.min(offset, Math.floor(Math.max(items.length - 1, 0) / pageSize) * pageSize));
+  return {
+    visible: items.slice(safeOffset, safeOffset + pageSize),
+    safeOffset,
+    hasPrevious: safeOffset > 0,
+    hasNext: safeOffset + pageSize < items.length,
+  };
 }
 
 function abbreviate(value: string): string { const parts = value.split("/").filter(Boolean); return parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : value; }
