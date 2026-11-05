@@ -4,7 +4,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import pino from "pino";
 import { afterEach, expect, it, vi } from "vitest";
-import { PromptNotSentError, TurnCoordinator } from "../src/turns.js";
+import { PromptNotSentError, QueueActionError, TurnCoordinator } from "../src/turns.js";
 import { StateStore } from "../src/store.js";
 import { CodexRpcError, type CodexRpcClient } from "../src/codex-rpc.js";
 import type { ProjectRegistry } from "../src/projects.js";
@@ -128,4 +128,102 @@ it("reads full paginated turns in chronological order and resumes without loadin
   expect(rpc.request).toHaveBeenCalledWith("thread/turns/list", { threadId: "a", limit: 50, sortDirection: "desc", itemsView: "full" });
   await turns.prompt("a", "Continue");
   expect(rpc.request).toHaveBeenCalledWith("thread/resume", { threadId: "a", excludeTurns: true });
+});
+
+it("sends the selected queued entry now, leaving other entries unchanged", async () => {
+  const { turns, rpc, store } = fixture();
+  const first = store.enqueuePrompt("a", "first");
+  const selected = store.enqueuePrompt("a", "selected");
+  expect(await turns.sendQueuedNow(selected)).toBe("started");
+  expect(rpc.request).toHaveBeenCalledWith("turn/start", expect.objectContaining({ input: [{ type: "text", text: "selected", text_elements: [] }] }));
+  expect(store.getQueuedPrompt(selected)).toBeNull();
+  expect(store.getQueuedPrompt(first)?.body).toBe("first");
+  await expect(turns.sendQueuedNow(selected)).rejects.toBeInstanceOf(QueueActionError);
+});
+
+it("steers an owned active turn and deletes the queued entry only after acknowledgement", async () => {
+  const { turns, rpc, store } = fixture();
+  await turns.prompt("a", "original");
+  const id = store.enqueuePrompt("a", "steer this");
+  let release!: () => void;
+  rpc.request.mockImplementation(async (method) => {
+    if (method === "turn/steer") await new Promise<void>((resolve) => { release = resolve; });
+    return {};
+  });
+  const sending = turns.sendQueuedNow(id);
+  expect(store.getQueuedPrompt(id)?.retryCount).toBe(-1);
+  expect(turns.isQueuedStarting(id)).toBe(true);
+  await expect(turns.sendQueuedNow(id)).rejects.toBeInstanceOf(QueueActionError);
+  release();
+  expect(await sending).toBe("steered");
+  expect(rpc.request).toHaveBeenCalledWith("turn/steer", { threadId: "a", expectedTurnId: "turn", input: [{ type: "text", text: "steer this", text_elements: [] }] });
+  expect(store.getQueuedPrompt(id)).toBeNull();
+  expect(turns.isQueuedStarting(id)).toBe(false);
+});
+
+it("keeps uncertain steering in the queue without permitting an accidental replay", async () => {
+  const { turns, rpc, store } = fixture();
+  await turns.prompt("a", "original");
+  const id = store.enqueuePrompt("a", "steer");
+  rpc.request.mockRejectedValueOnce(new Error("timeout"));
+  await expect(turns.sendQueuedNow(id)).rejects.toThrow("timeout");
+  expect(store.getQueuedPrompt(id)?.retryCount).toBe(-1);
+  await expect(turns.sendQueuedNow(id)).rejects.toBeInstanceOf(QueueActionError);
+});
+
+it("preserves a safely rejected steer and a writer-locked queued start", async () => {
+  const { turns, rpc, store } = fixture();
+  await turns.prompt("a", "original");
+  const id = store.enqueuePrompt("a", "steer");
+  rpc.request.mockRejectedValueOnce(new CodexRpcError(-32600, "expectedTurnId mismatch"));
+  await expect(turns.sendQueuedNow(id)).rejects.toBeInstanceOf(CodexRpcError);
+  expect(store.getQueuedPrompt(id)?.retryCount).toBe(0);
+  store.updateTurn("a", "turn", "completed");
+  rpc.request.mockRejectedValueOnce(new CodexRpcError(-32600, "thread a already has an active writer"));
+  await expect(turns.sendQueuedNow(id)).rejects.toBeInstanceOf(QueueActionError);
+  expect(store.getQueuedPrompt(id)?.retryCount).toBe(0);
+});
+
+it("does not exceed capacity or send a queue entry twice while resume is pending", async () => {
+  const { turns, rpc, store } = fixture();
+  const id = store.enqueuePrompt("a", "selected");
+  let release!: () => void;
+  rpc.request.mockImplementation(async (method) => {
+    if (method === "thread/resume") await new Promise<void>((resolve) => { release = resolve; });
+    return { turn: { id: "started" } };
+  });
+  const sending = turns.sendQueuedNow(id);
+  await expect(turns.sendQueuedNow(id)).rejects.toBeInstanceOf(QueueActionError);
+  const other = store.enqueuePrompt("b", "other");
+  await expect(turns.sendQueuedNow(other)).rejects.toBeInstanceOf(QueueActionError);
+  expect(store.getQueuedPrompt(other)?.body).toBe("other");
+  release();await sending;
+  expect(rpc.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
+});
+
+it("starts native queue entries by ID without copying or deleting their text", async () => {
+  const { turns, rpc, store } = fixture();
+  Object.assign(rpc, { supportsPaginatedHistory: true });
+  rpc.request.mockImplementation(async (method) => method === "thread/queue/list"
+    ? { data: [{ id: "native", input: [{ type: "text", text: "selected" }] }] }
+    : { turn: { id: "native-turn" } });
+  expect(await turns.startNativeQueuedNow("a", "native")).toBe("started");
+  expect(rpc.request).toHaveBeenCalledWith("thread/queue/start", { threadId: "a", queuedSubmissionId: "native" });
+  expect(rpc.request.mock.calls.some(([method]) => ["thread/queue/delete", "thread/queue/add", "turn/start"].includes(method))).toBe(false);
+  expect(store.activeTurn("a")?.turnId).toBe("native-turn");
+  expect(store.recoveryPrompt("a", "native-turn")?.body).toBe("selected");
+});
+
+it("preserves desktop-owned native entries when immediate start is unavailable", async () => {
+  const { turns, rpc, store } = fixture();
+  Object.assign(rpc, { supportsPaginatedHistory: true });
+  rpc.request.mockImplementation(async (method) => {
+    if (method === "thread/queue/list") return { data: [{ id: "native", input: [] }] };
+    throw new CodexRpcError(-32600, "thread a already has an active writer");
+  });
+  await expect(turns.startNativeQueuedNow("a", "native")).rejects.toThrow("сообщение осталось в очереди");
+  expect(rpc.request.mock.calls.map(([method]) => method)).toEqual(["thread/queue/list", "thread/resume"]);
+  expect(store.activeTurn("a")).toBeNull();
+  expect(turns.isNativeQueuedStarting("a", "native")).toBe(false);
+  await expect(turns.startNativeQueuedNow("a", "missing")).rejects.toThrow("уже отправлено или удалено");
 });

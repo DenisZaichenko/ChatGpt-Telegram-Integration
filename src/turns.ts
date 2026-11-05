@@ -15,6 +15,7 @@ export type PromptDisposition = "started" | "queued" | "queued_external" | "exte
 /** The failure happened before turn/start; retrying cannot duplicate a prompt. */
 export class PromptNotSentError extends Error {}
 
+export class QueueActionError extends Error {}
 
 export interface AssistantMessageSnapshot {
   messageId: string;
@@ -33,6 +34,7 @@ export class TurnCoordinator {
   private readonly owned = new Set<string>();
   private readonly startingChats = new Set<string>();
   private readonly startingQueued = new Set<number>();
+  private readonly startingNative = new Set<string>();
   private readonly retrying = new Set<string>();
   private draining = false;
   private lifecycleHandler: ((event: TurnLifecycleEvent) => Promise<void>) | null = null;
@@ -185,6 +187,70 @@ export class TurnCoordinator {
   }
 
   isQueuedStarting(id: number): boolean { return this.startingQueued.has(id); }
+
+  async sendQueuedNow(id: number): Promise<"started" | "steered"> {
+    const queued = this.store.getQueuedPrompt(id);
+    if (!queued) throw new QueueActionError("Сообщение уже отправлено или удалено из очереди.");
+    if (queued.retryCount < 0) throw new QueueActionError("Доставка этого сообщения не подтверждена. Сначала проверьте переписку — повтор может создать дубль.");
+    if (this.startingQueued.has(id) || this.startingChats.has(queued.chatId)) throw new QueueActionError("Сообщение уже отправляется. Обновите очередь.");
+    const chat = this.store.getChat(queued.chatId);
+    if (!chat) throw new QueueActionError("Чат больше недоступен.");
+    this.validateChat(chat);
+    const active = this.store.activeTurn(chat.id);
+    if (active && !this.owned.has(turnKey(chat.id, active.turnId))) throw new QueueActionError("Текущая работа управляется другим процессом Codex.");
+    if (!active && this.store.activeTurns().length + this.startingChats.size >= this.maxConcurrent) throw new QueueActionError("Все слоты выполнения заняты. Сообщение осталось в очереди.");
+    this.startingQueued.add(id);
+    try {
+      if (active) {
+        // Persist uncertainty before sending, so a crash cannot replay this entry.
+        this.store.markQueuedAmbiguous(id);
+        try { await this.steer(chat.id, queued.body); }
+        catch (error) {
+          if (error instanceof CodexRpcError && error.code === -32600) this.store.restoreQueuedRetryCount(id, queued.retryCount);
+          throw error;
+        }
+        this.store.deleteQueuedPrompt(id);
+        return "steered";
+      }
+      if (await this.startTurn(chat, queued.body, id) === "external_busy") throw new QueueActionError("Чатом управляет ChatGPT на Mac. Немедленная отправка доступна в приложении; сообщение осталось в очереди.");
+      return "started";
+    } finally { this.startingQueued.delete(id); }
+  }
+
+  isNativeQueuedStarting(chatId: string, id: string): boolean { return this.startingNative.has(turnKey(chatId, id)); }
+
+  async startNativeQueuedNow(chatId: string, id: string): Promise<"started"> {
+    const key = turnKey(chatId, id);
+    if (this.startingNative.has(key) || this.startingChats.has(chatId)) throw new QueueActionError("Сообщение уже отправляется. Обновите очередь.");
+    if (this.store.activeTurn(chatId)) throw new QueueActionError("В чате уже выполняется задание. Сообщение осталось в очереди ChatGPT.");
+    if (this.store.activeTurns().length + this.startingChats.size >= this.maxConcurrent) throw new QueueActionError("Все слоты выполнения заняты. Сообщение осталось в очереди.");
+    this.startingNative.add(key);
+    this.startingChats.add(chatId);
+    try {
+      const queued = (await this.nativeQueue(chatId)).find((item) => item.id === id);
+      if (!queued) throw new QueueActionError("Сообщение уже отправлено или удалено из очереди ChatGPT.");
+      const chat = this.store.getChat(chatId)!;
+      const cwd = this.validateChat(chat);
+      const fullAccess = this.store.isFullAccess(chatId);
+      try {
+        await this.rpc.request("thread/resume", { threadId: chatId, excludeTurns: true, cwd,
+          approvalPolicy: fullAccess ? "never" : "on-request", sandbox: fullAccess ? "danger-full-access" : "workspace-write" });
+      } catch (error) {
+        if (error instanceof CodexRpcError && error.code === -32600 && /already has an active writer\b/.test(error.message)) {
+          throw new QueueActionError("Очередью управляет ChatGPT на Mac. «Отправить сейчас» нужно нажать в приложении; сообщение осталось в очереди.");
+        }
+        throw error;
+      }
+      // Start by queue ID: the server atomically consumes it. Never copy its text
+      // to turn/start, which could race the desktop consumer and duplicate it.
+      const response = object(await this.rpc.request("thread/queue/start", { threadId: chatId, queuedSubmissionId: id }));
+      const turnId = String(object(response.turn).id);
+      this.store.startTurn(chatId, turnId, "running");
+      this.store.saveRecoveryPrompt(chatId, turnId, queued.body);
+      this.owned.add(turnKey(chatId, turnId));
+      return "started";
+    } finally { this.startingNative.delete(key); this.startingChats.delete(chatId); }
+  }
 
   async history(chatId: string, pairs: number): Promise<string> {
     const chat = this.store.getChat(chatId);

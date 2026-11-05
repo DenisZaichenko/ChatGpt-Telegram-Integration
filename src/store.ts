@@ -485,6 +485,7 @@ export class StateStore {
 
   deleteQueuedPrompt(id: number): void { this.db.prepare("DELETE FROM prompt_queue WHERE id=?").run(id); }
   markQueuedAmbiguous(id: number): void { this.db.prepare("UPDATE prompt_queue SET retry_count=-1 WHERE id=?").run(id); }
+  restoreQueuedRetryCount(id: number, retryCount: number): void { this.db.prepare("UPDATE prompt_queue SET retry_count=? WHERE id=?").run(retryCount, id); }
 
   getQueuedPrompt(id: number): QueuedPrompt | null {
     const row = this.db.prepare("SELECT q.*,o.position FROM prompt_queue q JOIN prompt_queue_positions o ON o.prompt_id=q.id WHERE q.id=?").get(id) as QueueRow | undefined;
