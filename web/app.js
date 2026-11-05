@@ -164,6 +164,68 @@ function editQueue(card, item) {
     button("Отмена", "", () => { state.edit = null; delete state.rendered.queue; renderQueue(state.detail); }));
   card.replaceChildren(input, actions); input.focus();
 }
+function parseDiff(text) {
+  const sections = [];
+  let section = null, oldLine = 0, newLine = 0, oldLeft = 0, newLeft = 0;
+  const start = () => { section = { before: "", after: "", kind: "modified", rows: [], added: 0, removed: 0 }; sections.push(section); oldLeft = newLeft = 0; };
+  const filename = (value) => {
+    let name = value.split("\t")[0];
+    if (value.startsWith('"')) { try { name = JSON.parse(value); } catch { name = value; } }
+    return name === "/dev/null" ? "" : name.replace(/^[ab]\//, "");
+  };
+  for (const line of text.replace(/\n$/, "").split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      start();
+      const names = line.slice(11).match(/"(?:\\.|[^"\\])*"|\S+/g) || [];
+      section.before = filename(names[0] || ""); section.after = filename(names[1] || "");
+      continue;
+    }
+    if (!section) start();
+    const hunk = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (hunk) {
+      oldLine = Number(hunk[1]); newLine = Number(hunk[3]);
+      oldLeft = Number(hunk[2] ?? 1); newLeft = Number(hunk[4] ?? 1);
+      section.rows.push({ kind: "hunk", text: line }); continue;
+    }
+    if ((oldLeft || newLeft) && /^[ +\-]/.test(line)) {
+      const kind = line[0] === "+" ? "added" : line[0] === "-" ? "removed" : "context";
+      const row = { kind, text: line.slice(1), old: "", next: "" };
+      if (kind !== "added") { row.old = oldLine++; oldLeft = Math.max(0, oldLeft - 1); }
+      if (kind !== "removed") { row.next = newLine++; newLeft = Math.max(0, newLeft - 1); }
+      if (kind === "added") section.added++;
+      if (kind === "removed") section.removed++;
+      section.rows.push(row); continue;
+    }
+    if (line.startsWith("--- ")) {
+      if (section.rows.length && section.after) start();
+      section.before = filename(line.slice(4));
+      if (!section.before) section.kind = "added";
+    } else if (line.startsWith("+++ ")) {
+      section.after = filename(line.slice(4));
+      if (!section.after) section.kind = "deleted";
+    } else if (line.startsWith("rename from ")) {
+      section.before = filename(line.slice(12)); section.kind = "renamed";
+    } else if (line.startsWith("rename to ")) {
+      section.after = filename(line.slice(10)); section.kind = "renamed";
+    } else if (line.startsWith("new file mode ")) section.kind = "added";
+    else if (line.startsWith("deleted file mode ")) section.kind = "deleted";
+    else if (!line.startsWith("index ") && !line.startsWith("similarity index ") && line) section.rows.push({ kind: "meta", text: line });
+  }
+  const files = new Map();
+  for (const part of sections) {
+    const name = part.after || part.before || "Изменения";
+    if (!files.has(name)) files.set(name, { name, before: part.before, kind: part.kind, parts: [], added: 0, removed: 0 });
+    const file = files.get(name);
+    file.parts.push(part); file.added += part.added; file.removed += part.removed;
+  }
+  return [...files.values()];
+}
+function diffStats(added, removed) {
+  const stats = node("span", "diff-stats");
+  stats.append(node("span", "diff-added-count", `+${added}`), node("span", "diff-removed-count", `−${removed}`));
+  stats.setAttribute("aria-label", `Добавлено ${added}, удалено ${removed}`);
+  return stats;
+}
 function renderDiff(detail) {
   const signature = JSON.stringify(detail.diff);
   if (state.rendered.diff === signature) return;
@@ -171,22 +233,67 @@ function renderDiff(detail) {
   if (!detail.diff?.diff) { $("diff").replaceChildren(node("p", "empty", "Изменений файлов пока нет.")); return; }
   const { diff, turnId } = detail.diff;
   const chatId = state.selected;
-  const lines = diff.split("\n");
-  const added = lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length;
-  const removed = lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length;
+  const files = parseDiff(diff);
+  const openFiles = new Map([...$("diff").querySelectorAll(".diff-file")].map((el) => [el.dataset.path, el.open]));
+  const scrollTop = $("diff").scrollTop;
+  const wrap = $("diff").querySelector(".diff-wrap")?.getAttribute("aria-pressed") !== "false";
   const summary = node("div", "diff-summary");
-  summary.append(node("span", "", `Изменения · +${added} / −${removed}`), button("Скачать .diff ↓", "text-button", () => write(async () => {
+  const totals = node("div", "diff-totals");
+  totals.append(node("span", "diff-file-count", `Файлы · ${files.length}`), diffStats(files.reduce((sum, file) => sum + file.added, 0), files.reduce((sum, file) => sum + file.removed, 0)));
+  const actions = node("div", "diff-tools");
+  const wrapButton = button("↵", "diff-wrap", () => {
+    const enabled = wrapButton.getAttribute("aria-pressed") !== "true";
+    wrapButton.setAttribute("aria-pressed", String(enabled)); $("diff").classList.toggle("diff-nowrap", !enabled);
+  }, "Перенос строк");
+  wrapButton.setAttribute("aria-pressed", String(wrap));
+  actions.append(wrapButton, button("↓ .diff", "diff-download", () => write(async () => {
     const blob = await api(`${chatPath(chatId)}/diff/${encodeURIComponent(turnId)}`, "GET", undefined, undefined, true);
     const url = URL.createObjectURL(blob);
     const link = node("a", ""); link.href = url; link.download = "changes.diff"; document.body.append(link); link.click(); link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 60000);
-  })));
-  const pre = node("pre", "");
-  const visible = lines.slice(0, 3000);
-  pre.append(...visible.map((line) => node("span", `diff-line${line.startsWith("+") ? " add" : line.startsWith("-") ? " remove" : line.startsWith("@@") ? " hunk" : ""}`, line || " ")));
-  $("diff").replaceChildren(summary, pre);
-  if (detail.diff.source === "history") $("diff").insertBefore(node("p", "diff-note", "Последнее задание с правками · изменения по шагам, не текущий git diff."), pre);
-  if (lines.length > visible.length) $("diff").append(node("p", "muted", "Показаны первые 3000 строк. Полный diff доступен для скачивания."));
+  }), "Скачать .diff ↓"));
+  summary.append(totals, actions);
+  const cards = files.map((file, index) => {
+    const card = node("details", "diff-file"); card.dataset.path = file.name;
+    card.open = openFiles.get(file.name) ?? index === 0;
+    const header = node("summary", "diff-file-header");
+    const chevron = node("span", "diff-chevron", "›"); chevron.setAttribute("aria-hidden", "true");
+    const path = node("span", "diff-file-path");
+    const split = file.name.lastIndexOf("/");
+    path.append(node("span", "diff-filename", file.name.slice(split + 1)));
+    if (split >= 0) path.append(node("span", "diff-directory", file.name.slice(0, split + 1)));
+    path.title = file.before && file.before !== file.name ? `${file.before} → ${file.name}` : file.name;
+    const labels = { added: "Добавлен", deleted: "Удалён", modified: "Изменён", renamed: "Переименован" };
+    const badge = node("span", `diff-file-kind ${file.kind}`, { added: "A", deleted: "D", modified: "M", renamed: "R" }[file.kind]);
+    badge.title = labels[file.kind]; badge.setAttribute("aria-label", labels[file.kind]);
+    header.append(chevron, badge, path, diffStats(file.added, file.removed)); card.append(header);
+    function renderBody() {
+      if (card.childElementCount > 1) return;
+      let remaining = 1200;
+      for (const [partIndex, part] of file.parts.entries()) {
+        if (remaining <= 0) break;
+        if (file.parts.length > 1) card.append(node("div", "diff-step", `Правка ${partIndex + 1} из ${file.parts.length}`));
+        const pre = node("pre", "diff-code-scroll"); pre.tabIndex = 0; pre.setAttribute("aria-label", `Изменения ${file.name}`);
+        for (const row of part.rows.slice(0, remaining)) {
+          const line = node("span", `diff-line diff-row diff-${row.kind}`);
+          const old = node("span", "diff-number", row.old ?? ""); old.setAttribute("aria-hidden", "true");
+          const next = node("span", "diff-number", row.next ?? ""); next.setAttribute("aria-hidden", "true");
+          const marker = node("span", "diff-marker", row.kind === "added" ? "+" : row.kind === "removed" ? "−" : "");
+          line.append(old, next, marker, node("code", "diff-code", row.text || " ")); pre.append(line);
+        }
+        remaining -= part.rows.length;
+        if (!part.rows.length) pre.append(node("span", "diff-file-empty", "Изменены метаданные файла."));
+        card.append(pre);
+      }
+      if (file.parts.reduce((sum, part) => sum + part.rows.length, 0) > 1200) card.append(node("p", "diff-truncated", "Показаны первые 1200 строк файла. Полная версия — в .diff."));
+    }
+    card.addEventListener("toggle", () => { if (card.open) renderBody(); });
+    if (card.open) renderBody();
+    return card;
+  });
+  $("diff").replaceChildren(summary, ...(detail.diff.source === "history" ? [node("p", "diff-note", "Из истории задания · правки по шагам, не текущий git diff.")] : []), ...cards);
+  $("diff").classList.toggle("diff-nowrap", !wrap);
+  $("diff").scrollTop = scrollTop;
 }
 function renderRecoveries(detail) {
   const signature = JSON.stringify(detail.recoveries);
