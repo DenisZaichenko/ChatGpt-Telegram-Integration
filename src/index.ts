@@ -13,6 +13,8 @@ import { StateStore } from "./store.js";
 import { GrammyGateway, TelegramController } from "./telegram.js";
 import { label } from "./text.js";
 import { TurnCoordinator } from "./turns.js";
+import { MiniAppServer } from "./mini-app.js";
+import { MiniAppTunnel } from "./mini-app-tunnel.js";
 
 const VERSION = "0.1.0";
 const config = loadConfig();
@@ -44,6 +46,8 @@ if (process.argv[2] === "doctor") {
   const approvals = new ApprovalCoordinator(rpc, store, gateway, config.allowedUserId, config.allowedUserId, config.approvalExpiryMs, chatLabel, logger);
   const turns = new TurnCoordinator(rpc, store, registry, output, approvals, config.allowedUserId, config.maxConcurrentTurns, config.maxQueuedPromptsPerChat, logger);
   const controller = new TelegramController(config, gateway, store, registry, rpc, turns, approvals, logger);
+  const miniApp = config.miniAppUrl || config.miniAppTunnelBin ? new MiniAppServer(config, store, turns, rpc, logger) : null;
+  const tunnel = config.miniAppTunnelBin ? new MiniAppTunnel(config.miniAppTunnelBin, config.miniAppPort, (url) => controller.configureMiniApp(url), logger) : null;
   const notifications = new UnreadNotificationMonitor(store, turns, (chat, messages) => controller.sendUnreadNotification(chat, messages), logger);
   approvals.start();
 
@@ -55,6 +59,8 @@ if (process.argv[2] === "doctor") {
     controller.stop();
     notifications.stop();
     approvals.stop();
+    await tunnel?.stop();
+    await miniApp?.stop();
     await new Promise((resolve) => setTimeout(resolve, 250));
     store.markActiveTurnsUnknown("Service stopped while turn was active");
     await rpc.stop();
@@ -68,6 +74,11 @@ if (process.argv[2] === "doctor") {
     await rpc.request("account/read", { refreshToken: false });
     await turns.refreshChats();
     await notifications.start();
+    if (miniApp) {
+      await miniApp.start();
+      logger.info({ port: config.miniAppPort }, "Mini App listening on localhost");
+      tunnel?.start();
+    }
     logger.info({ version: VERSION, projects: store.listProjects().length }, "Service started");
     await controller.start();
   } catch (error) {

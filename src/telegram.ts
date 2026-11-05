@@ -100,10 +100,26 @@ export class TelegramController {
       { command: "new", description: "Create a chat" }, { command: "where", description: "Show current routing" },
       { command: "status", description: "Show turn status" }, { command: "stop", description: "Stop the current turn" },
       { command: "queue", description: "Manage queued prompts" },
+      { command: "app", description: "Open the Mini App" },
       { command: "fullaccess", description: "Manage full access for this chat" },
       { command: "help", description: "Show commands" },
     ]);
+    if (this.config.miniAppUrl) await this.configureMiniApp(this.config.miniAppUrl);
     return this.gateway.bot.start({ allowed_updates: ["message", "callback_query"] });
+  }
+
+  async configureMiniApp(url: string): Promise<void> {
+    this.config.miniAppUrl = url;
+    await this.gateway.bot.api.setChatMenuButton({ chat_id: this.config.allowedUserId, menu_button: { type: "web_app", text: "Открыть", web_app: { url } } });
+    this.logger.info({ url }, "Mini App menu ready");
+  }
+
+  private async openMiniApp(chatId: number): Promise<void> {
+    if (!this.config.miniAppUrl) {
+      await this.gateway.sendText(chatId, "Mini App is not connected yet. Try /app again shortly.");
+      return;
+    }
+    await this.gateway.sendText(chatId, "Чаты, сообщения, очередь и изменения — в Mini App.", { replyMarkup: { inline_keyboard: [[{ text: "Открыть Codex Remote", web_app: { url: this.config.miniAppUrl } }]] } });
   }
 
   stop(): void { this.accepting = false; this.gateway.bot.stop(); }
@@ -175,6 +191,7 @@ export class TelegramController {
     }
     const [command, args] = parsed;
     switch (command) {
+      case "app": await this.openMiniApp(chatId); break;
       case "start": await this.showStart(chatId); break;
       case "projects": await this.showProjects(chatId); break;
       case "project": await this.selectProjectAlias(chatId, args); break;
@@ -563,7 +580,7 @@ export class TelegramController {
 }
 
 function mainKeyboard(): Keyboard {
-  return new Keyboard().text("/projects").text("/chats").row().text("/queue").text("/status").row().text("/stop").resized().persistent();
+  return new Keyboard().text("/app").row().text("/projects").text("/chats").row().text("/queue").text("/status").row().text("/stop").resized().persistent();
 }
 
 export function parseCommand(text: string): [string, string] | null {
