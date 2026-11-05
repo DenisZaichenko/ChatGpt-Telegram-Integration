@@ -19,6 +19,11 @@ const BACKOFF_SECONDS = [1, 2, 5, 10, 30];
 const execFileAsync = promisify(execFile);
 export const TESTED_CODEX_VERSION = { major: 0, minor: 145, minimumPatch: 0 } as const;
 const TESTED_CODEX_RANGE = `>=${TESTED_CODEX_VERSION.major}.${TESTED_CODEX_VERSION.minor}.${TESTED_CODEX_VERSION.minimumPatch} <${TESTED_CODEX_VERSION.major}.${TESTED_CODEX_VERSION.minor + 1}.0`;
+export const TESTED_PAGINATED_CODEX_VERSION = "0.166.0-alpha.6";
+
+export class CodexRpcError extends Error {
+  constructor(readonly code: number, message: string) { super(`Codex ${code}: ${message}`); }
+}
 
 export class CodexRpcClient extends EventEmitter {
   private child: ChildProcessWithoutNullStreams | null = null;
@@ -28,6 +33,7 @@ export class CodexRpcClient extends EventEmitter {
   private initialized = false;
   private failures = 0;
   private restartTimer: NodeJS.Timeout | null = null;
+  supportsPaginatedHistory = false;
 
   constructor(private readonly config: Config, private readonly logger: Logger, private readonly version: string) { super(); }
 
@@ -115,11 +121,14 @@ export class CodexRpcClient extends EventEmitter {
 
   private async checkVersion(): Promise<void> {
     const { stdout } = await execFileAsync(this.config.codexBin, ["--version"], { env: childEnvironment(this.config), timeout: 10_000 });
+    const fullVersion = /codex-cli\s+(\S+)/.exec(stdout)?.[1];
+    this.supportsPaginatedHistory = fullVersion === TESTED_PAGINATED_CODEX_VERSION;
+    if (this.supportsPaginatedHistory) return;
     const match = /(\d+)\.(\d+)\.(\d+)/.exec(stdout);
     if (!match) throw new Error("Unable to parse Codex CLI version");
     const [, major, minor, patch] = match.map(Number);
     if (major !== TESTED_CODEX_VERSION.major || minor !== TESTED_CODEX_VERSION.minor || patch! < TESTED_CODEX_VERSION.minimumPatch) {
-      throw new Error(`Unsupported Codex CLI ${major}.${minor}.${patch}; tested range is ${TESTED_CODEX_RANGE}`);
+      throw new Error(`Unsupported Codex CLI ${fullVersion}; tested versions: ${TESTED_CODEX_RANGE} (legacy history), ${TESTED_PAGINATED_CODEX_VERSION} (paginated history)`);
     }
   }
 
@@ -153,7 +162,7 @@ export class CodexRpcClient extends EventEmitter {
       if (!call) return;
       this.pending.delete(response.id);
       clearTimeout(call.timeout);
-      if (response.error) call.reject(new Error(`Codex ${response.error.code}: ${response.error.message}`));
+      if (response.error) call.reject(new CodexRpcError(response.error.code, response.error.message));
       else call.resolve(response.result);
       return;
     }

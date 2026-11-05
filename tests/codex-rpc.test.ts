@@ -9,13 +9,13 @@ import type { Config } from "../src/config.js";
 const temporary: string[] = [];
 afterEach(() => { for (const dir of temporary.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
 
-function fixture(): { config: Config; transcript: string } {
+function fixture(version = "0.145.0"): { config: Config; transcript: string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "remote-rpc-")); temporary.push(dir);
   const executable = path.join(dir, "fake-codex");
   const transcript = path.join(dir, "transcript.jsonl");
   fs.writeFileSync(executable, `#!/usr/bin/env node
 const fs = require("node:fs");
-if (process.argv.includes("--version")) { process.stdout.write("codex-cli 0.145.0\\n"); process.exit(0); }
+if (process.argv.includes("--version")) { process.stdout.write("codex-cli ${version}\\n"); process.exit(0); }
 const readline = require("node:readline");
 let initialized = false;
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
@@ -44,6 +44,17 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 }
 
 describe("Codex JSONL transport", () => {
+  it("enables pagination only for the verified bundled CLI build", async () => {
+    const { config } = fixture("0.166.0-alpha.6");
+    const rpc = new CodexRpcClient(config, pino({ level: "silent" }), "test");
+    await rpc.start();
+    expect(rpc.supportsPaginatedHistory).toBe(true);
+    await rpc.stop();
+    const unsupported = fixture("0.166.0-alpha.7");
+    const other = new CodexRpcClient(unsupported.config, pino({ level: "silent" }), "test");
+    await expect(other.start()).rejects.toThrow("Unsupported Codex CLI");
+    await other.stop();
+  });
   it("initializes in order and rejects pending calls on child crash", async () => {
     const { config, transcript } = fixture();
     const rpc = new CodexRpcClient(config, pino({ level: "silent" }), "test");
