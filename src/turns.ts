@@ -1,6 +1,7 @@
 import type { Logger } from "pino";
+import { randomUUID } from "node:crypto";
 import { ApprovalCoordinator } from "./approvals.js";
-import { CodexRpcClient } from "./codex-rpc.js";
+import { CodexRpcClient, CodexRpcError } from "./codex-rpc.js";
 import { OutputCoalescer } from "./output.js";
 import { ProjectRegistry } from "./projects.js";
 import { canonicalDirectory, isInside, redact, shortId } from "./security.js";
@@ -9,7 +10,11 @@ import type { CodexChat, CodexThreadSummary, RpcRequest } from "./types.js";
 
 const SOURCE_KINDS = ["cli", "vscode", "appServer", "unknown"];
 
-export type PromptDisposition = "started" | "queued" | "external_busy";
+export type PromptDisposition = "started" | "queued" | "queued_external" | "external_busy";
+
+/** The failure happened before turn/start; retrying cannot duplicate a prompt. */
+export class PromptNotSentError extends Error {}
+
 
 export interface AssistantMessageSnapshot {
   messageId: string;
@@ -27,6 +32,9 @@ export interface TurnLifecycleEvent {
 export class TurnCoordinator {
   private readonly owned = new Set<string>();
   private readonly startingChats = new Set<string>();
+  private readonly startingQueued = new Set<number>();
+  private readonly retrying = new Set<string>();
+  private draining = false;
   private lifecycleHandler: ((event: TurnLifecycleEvent) => Promise<void>) | null = null;
 
   constructor(
@@ -112,14 +120,43 @@ export class TurnCoordinator {
     return chat;
   }
 
-  async prompt(chatId: string, text: string): Promise<PromptDisposition> {
+  async prompt(chatId: string, text: string, requestId: string = randomUUID()): Promise<PromptDisposition> {
     const chat = this.store.getChat(chatId);
-    if (!chat) throw new Error("Select an indexed chat first");
-    if (this.store.activeTurn(chatId)) return this.enqueue(chatId, text);
-    if (chat.status === "active") return "external_busy";
-    if (this.store.activeTurns().length >= this.maxConcurrent) return this.enqueue(chatId, text);
-    await this.startTurn(chat, text);
-    return "started";
+    if (!chat) throw new PromptNotSentError("Select an indexed chat first");
+    if (this.store.activeTurn(chatId) || this.startingChats.has(chatId)) return this.enqueue(chatId, text);
+    if (chat.status === "active") return this.enqueueExternal(chatId, text, requestId);
+    if (this.store.activeTurns().length + this.startingChats.size >= this.maxConcurrent) return this.enqueue(chatId, text);
+    const result = await this.startTurn(chat, text);
+    return result === "external_busy" ? this.enqueueExternal(chatId, text, requestId) : result;
+  }
+
+  async nativeQueue(chatId: string): Promise<{ id: string; body: string; retryCount: number; native: true }[]> {
+    if (!this.rpc.supportsPaginatedHistory) return [];
+    const chat = this.store.getChat(chatId);
+    if (!chat) throw new Error("Chat is not indexed");
+    this.validateChat(chat);
+    const items: { id: string; body: string; retryCount: number; native: true }[] = [];
+    let cursor: string | null = null;
+    do {
+      const response = object(await this.rpc.request("thread/queue/list", { threadId: chatId, cursor, limit: 100 }));
+      for (const raw of Array.isArray(response.data) ? response.data : []) {
+        const item = object(raw);
+        items.push({ id: String(item.id), body: userText({ content: item.input }), retryCount: 0, native: true });
+      }
+      cursor = typeof response.nextCursor === "string" ? response.nextCursor : null;
+    } while (cursor);
+    return items;
+  }
+
+  private async enqueueExternal(chatId: string, text: string, requestId: string): Promise<PromptDisposition> {
+    if (!this.rpc.supportsPaginatedHistory) return "external_busy";
+    try {
+      if ((await this.nativeQueue(chatId)).length >= this.maxQueuedPerChat) throw new Error("The ChatGPT queue is full");
+    } catch (error) { throw new PromptNotSentError(errorMessage(error), { cause: error }); }
+    // The desktop owner watches this shared queue. Never steal its writer lock or
+    // apply this service's permissions to a turn executed by the desktop app.
+    await this.rpc.request("thread/queue/add", { threadId: chatId, input: [{ type: "text", text }], clientUserMessageId: requestId });
+    return "queued_external";
   }
 
   async steer(chatId: string, text: string): Promise<void> {
@@ -135,18 +172,25 @@ export class TurnCoordinator {
   }
 
   async retryRecovery(chatId: string, turnId: string): Promise<PromptDisposition> {
+    const key = turnKey(chatId, turnId);
+    if (this.retrying.has(key)) throw new Error("Retry is already being submitted");
     const recovery = this.store.recoveryPrompt(chatId, turnId);
     if (!recovery) throw new Error("That recovery prompt is no longer available");
-    this.store.clearRecoveryPrompt(chatId, turnId);
-    return this.prompt(chatId, recovery.body);
+    this.retrying.add(key);
+    try {
+      const disposition = await this.prompt(chatId, recovery.body);
+      if (disposition !== "external_busy") this.store.clearRecoveryPrompt(chatId, turnId);
+      return disposition;
+    } finally { this.retrying.delete(key); }
   }
+
+  isQueuedStarting(id: number): boolean { return this.startingQueued.has(id); }
 
   async history(chatId: string, pairs: number): Promise<string> {
     const chat = this.store.getChat(chatId);
     if (!chat) throw new Error("Chat is not indexed");
     this.validateChat(chat);
-    const response = object(await this.rpc.request("thread/read", { threadId: chatId, includeTurns: true }));
-    const turns = Array.isArray(object(response.thread).turns) ? object(response.thread).turns as unknown[] : [];
+    const turns = await this.readTurns(chatId, pairs);
     const rendered: string[] = [];
     for (const rawTurn of turns.slice(-pairs)) {
       const items = Array.isArray(object(rawTurn).items) ? object(rawTurn).items as unknown[] : [];
@@ -157,12 +201,29 @@ export class TurnCoordinator {
     return rendered.join("\n\n");
   }
 
+  async messages(chatId: string): Promise<{ id: string; turnId: string; role: "user" | "assistant"; text: string; status: string }[]> {
+    const chat = this.store.getChat(chatId);
+    if (!chat) throw new Error("Chat is not indexed");
+    this.validateChat(chat);
+    const rawTurns = await this.readTurns(chatId, 50);
+    const messages: { id: string; turnId: string; role: "user" | "assistant"; text: string; status: string }[] = [];
+    for (const rawTurn of (Array.isArray(rawTurns) ? rawTurns : []).slice(-50)) {
+      const turn = object(rawTurn);
+      for (const rawItem of Array.isArray(turn.items) ? turn.items : []) {
+        const item = object(rawItem);
+        if (item.type !== "userMessage" && item.type !== "agentMessage") continue;
+        messages.push({ id: String(item.id ?? messages.length), turnId: String(turn.id), role: item.type === "userMessage" ? "user" : "assistant",
+          text: item.type === "userMessage" ? userText(item) : String(item.text ?? ""), status: String(turn.status ?? "unknown") });
+      }
+    }
+    return messages;
+  }
+
   async assistantMessages(chatId: string): Promise<AssistantMessageSnapshot[]> {
     const chat = this.store.getChat(chatId);
     if (!chat) throw new Error("Chat is not indexed");
     this.validateChat(chat);
-    const response = object(await this.rpc.request("thread/read", { threadId: chatId, includeTurns: true }));
-    const turns = Array.isArray(object(response.thread).turns) ? object(response.thread).turns as unknown[] : [];
+    const turns = await this.readTurns(chatId, 100);
     const messages: AssistantMessageSnapshot[] = [];
     for (const rawTurn of turns) {
       const turn = object(rawTurn);
@@ -181,18 +242,31 @@ export class TurnCoordinator {
     return messages;
   }
 
+  private async readTurns(chatId: string, limit: number): Promise<unknown[]> {
+    if (this.rpc.supportsPaginatedHistory) {
+      const response = object(await this.rpc.request("thread/turns/list", { threadId: chatId, limit, sortDirection: "desc", itemsView: "full" }));
+      return Array.isArray(response.data) ? response.data.reverse() : [];
+    }
+    const response = object(await this.rpc.request("thread/read", { threadId: chatId, includeTurns: true }));
+    return Array.isArray(object(response.thread).turns) ? object(response.thread).turns as unknown[] : [];
+  }
+
   private enqueue(chatId: string, text: string): "queued" {
-    if (this.store.queueCount(chatId) >= this.maxQueuedPerChat) throw new Error(`This chat already has ${this.maxQueuedPerChat} queued prompts`);
+    if (this.store.queueCount(chatId) >= this.maxQueuedPerChat) throw new PromptNotSentError(`This chat already has ${this.maxQueuedPerChat} queued prompts`);
     this.store.enqueuePrompt(chatId, text);
     return "queued";
   }
 
-  private async startTurn(chat: CodexChat, text: string, queuedId?: number): Promise<void> {
-    const cwd = this.validateChat(chat);
-    const fullAccess = this.store.isFullAccess(chat.id);
+  private async startTurn(chat: CodexChat, text: string, queuedId?: number): Promise<"started" | "external_busy"> {
+    let startRequested = false;
     this.startingChats.add(chat.id);
+    if (queuedId !== undefined) this.startingQueued.add(queuedId);
     try {
-      await this.rpc.request("thread/resume", { threadId: chat.id });
+      const cwd = this.validateChat(chat);
+      const fullAccess = this.store.isFullAccess(chat.id);
+      await this.rpc.request("thread/resume", { threadId: chat.id, ...(this.rpc.supportsPaginatedHistory ? { excludeTurns: true } : {}) });
+      if (queuedId !== undefined) this.store.markQueuedAmbiguous(queuedId);
+      startRequested = true;
       const response = object(await this.rpc.request("turn/start", {
         threadId: chat.id,
         input: [{ type: "text", text, text_elements: [] }],
@@ -208,11 +282,17 @@ export class TurnCoordinator {
       this.store.saveRecoveryPrompt(chat.id, turnId, text);
       this.owned.add(turnKey(chat.id, turnId));
       if (queuedId !== undefined) this.store.deleteQueuedPrompt(queuedId);
+      return "started";
     } catch (error) {
+      if (!startRequested) {
+        if (error instanceof CodexRpcError && error.code === -32600 && /already has an active writer\b/.test(error.message)) return "external_busy";
+        throw new PromptNotSentError(errorMessage(error), { cause: error });
+      }
       if (queuedId !== undefined) this.store.markQueuedAmbiguous(queuedId);
       throw error;
     } finally {
       this.startingChats.delete(chat.id);
+      if (queuedId !== undefined) this.startingQueued.delete(queuedId);
     }
   }
 
@@ -226,17 +306,30 @@ export class TurnCoordinator {
   }
 
   private async drainQueue(): Promise<void> {
-    while (this.store.activeTurns().length < this.maxConcurrent) {
-      const queued = this.store.nextQueuedPrompt();
+    if (this.draining) return;
+    this.draining = true;
+    try {
+    while (this.store.activeTurns().length + this.startingChats.size < this.maxConcurrent) {
+      const queued = this.store.listQueuedPrompts().find((item) => item.retryCount >= 0 && !this.startingQueued.has(item.id) && !this.startingChats.has(item.chatId) && !this.store.activeTurn(item.chatId) && this.store.getChat(item.chatId)?.status !== "active");
       if (!queued) break;
       const chat = this.store.getChat(queued.chatId);
       if (!chat) { this.store.deleteQueuedPrompt(queued.id); continue; }
-      try { await this.startTurn(chat, queued.body, queued.id); }
+      try {
+        if (await this.startTurn(chat, queued.body, queued.id) === "external_busy") {
+          if (await this.enqueueExternal(chat.id, queued.body, `telegram-queue-${queued.id}`) === "external_busy") break;
+          this.store.deleteQueuedPrompt(queued.id);
+        }
+      }
       catch (error) {
-        await this.output.warning(chat.id, "queued", this.telegramChatId, `A queued prompt has ambiguous delivery after a Codex error and was not replayed automatically: ${redact(errorMessage(error))}`);
+        if (!(error instanceof PromptNotSentError)) this.store.markQueuedAmbiguous(queued.id);
+        const explanation = error instanceof PromptNotSentError
+          ? "A queued prompt could not be sent; it remains in the queue"
+          : "A queued prompt has ambiguous delivery after a Codex error and was not replayed automatically";
+        await this.output.warning(chat.id, "queued", this.telegramChatId, `${explanation}: ${redact(errorMessage(error))}`);
         break;
       }
     }
+    } finally { this.draining = false; }
   }
 
   private async onNotification(method: string, params: Record<string, unknown>): Promise<void> {

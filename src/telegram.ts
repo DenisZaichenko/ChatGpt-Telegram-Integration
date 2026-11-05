@@ -253,7 +253,7 @@ export class TelegramController {
       const chat = this.store.getChat(value!);
       if (!chat) throw new Error("Chat is no longer available");
       const result = await this.turns.retryRecovery(chat.id, extra!);
-      const message = result === "started" ? "Retry started." : result === "queued" ? "Retry queued." : "The chat is active outside this bot; retry was not started.";
+      const message = result === "started" ? "Retry started." : result === "queued_external" ? "Retry queued in ChatGPT App; manage it in the Mini App or desktop app." : result === "queued" ? "Retry queued." : "The chat is active outside this bot; retry was not started.";
       await this.gateway.sendText(chatId, `${this.chatLabel(chat)}\n${message}`);
     } else if (action === "recoveryDismiss") {
       this.store.clearRecoveryPrompt(value!, extra!);
@@ -484,7 +484,7 @@ export class TelegramController {
     const chat = this.requireSelectedChat();
     this.store.markChatOpened(chat.id);
     const result = await this.turns.prompt(chat.id, text);
-    const message = result === "started" ? "Working…" : result === "queued" ? "Queued as the next turn." : "This chat appears active in Codex App. Wait for it to finish and refresh /chats; simultaneous control is unsupported.";
+    const message = result === "started" ? "Working…" : result === "queued_external" ? "Передано в очередь ChatGPT на Mac. Управление очередью — в Mini App или приложении. Разрешения и подтверждения — в приложении." : result === "queued" ? "Queued as the next turn." : "This chat appears active in Codex App. Wait for it to finish and refresh /chats; simultaneous control is unsupported.";
     await this.gateway.sendText(chatId, `${this.chatLabel(chat)}\n${message}`);
   }
 
