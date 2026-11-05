@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Codex Remote</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <section id="gate" class="gate" hidden><span class="brand-icon large">⌘</span><h1>Codex под рукой</h1><p>Откройте Mini App кнопкой «Открыть» в вашем Telegram-боте.</p><p class="muted">Чаты и задания доступны после входа через Telegram.</p></section>
+  <main id="workspace" class="workspace" hidden>
+    <aside class="sidebar" aria-label="Список чатов">
+      <div class="sidebar-toolbar"><h1>Чаты <span id="chat-count" class="count">0</span></h1><span id="connection" class="connection" role="status" aria-label="Подключение…" title="Подключение…"></span><button id="filters-toggle" class="icon-button" aria-label="Поиск и проекты" title="Поиск и проекты" aria-expanded="false" aria-controls="filters">⌕</button><button id="refresh" class="icon-button" aria-label="Обновить" title="Обновить">↻</button><button id="new-chat" class="icon-button" title="Новый чат" aria-label="Новый чат">＋</button></div>
+      <div id="filters" class="filters" hidden>
+        <label class="sr-only" for="project">Проект</label><select id="project"><option value="">Все проекты</option></select>
+        <div class="search"><span aria-hidden="true">⌕</span><label class="sr-only" for="search">Поиск чатов</label><input id="search" type="search" placeholder="Найти чат…" autocomplete="off"></div>
+      </div>
+      <div id="chats" class="chat-list"><p class="empty">Загружаем чаты…</p></div>
+    </aside>
+    <section class="detail" aria-label="Переписка">
+      <div id="welcome" class="welcome"><span class="brand-icon large">⌘</span><h2>Продолжим работу?</h2><p>Выберите чат или начните новый.<br>Всё важное из Codex — здесь.</p><div class="feature-chips"><span>Сообщения</span><span>Очередь</span><span>Изменения</span></div></div>
+      <div id="conversation" class="conversation" hidden>
+        <div class="conversation-toolbar">
+        <header class="detail-header"><button id="back" class="icon-button back" aria-label="К списку чатов">‹</button><div class="detail-title"><p id="chat-project" class="eyebrow"></p><h2 id="chat-title"></h2><p id="chat-status" class="muted"></p></div><button id="stop" class="stop-button" hidden>Остановить</button></header>
+        <nav class="tabs" aria-label="Разделы чата"><button data-tab="messages" class="active" aria-pressed="true">Переписка</button><button data-tab="queue" aria-pressed="false">Очередь <span id="queue-count" class="count">0</span></button><button data-tab="diff" aria-pressed="false">Изменения</button></nav>
+        </div>
+        <div id="recoveries" class="recoveries"></div>
+        <div id="messages" class="messages panel" role="log" aria-label="Сообщения"></div>
+        <div id="queue" class="queue panel" hidden></div>
+        <div id="diff" class="diff panel" hidden></div>
+        <form id="compose" class="compose"><label class="sr-only" for="prompt">Сообщение Codex</label><textarea id="prompt" rows="1" maxlength="12000"></textarea><button id="send" class="primary" type="submit" aria-label="Отправить">↑</button></form>
+      </div>
+    </section>
+  </main>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
