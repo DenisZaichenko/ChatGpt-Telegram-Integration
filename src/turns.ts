@@ -6,6 +6,7 @@ import { OutputCoalescer } from "./output.js";
 import { ProjectRegistry } from "./projects.js";
 import { canonicalDirectory, isInside, redact, shortId } from "./security.js";
 import { StateStore } from "./store.js";
+import { recordedTurnDiff, type ChatDiff } from "./history-diff.js";
 import type { CodexChat, CodexThreadSummary, RpcRequest } from "./types.js";
 
 const SOURCE_KINDS = ["cli", "vscode", "appServer", "unknown"];
@@ -306,6 +307,37 @@ export class TurnCoordinator {
       }
     }
     return messages;
+  }
+
+  async diff(chatId: string, turnId?: string): Promise<ChatDiff | null> {
+    const chat = this.store.getChat(chatId);
+    if (!chat) throw new Error("Chat is not indexed");
+    this.validateChat(chat);
+    let cursor: string | null = null;
+    const visited = new Set<string>();
+    do {
+      const response = object(await this.rpc.request(this.rpc.supportsPaginatedHistory ? "thread/turns/list" : "thread/read",
+        this.rpc.supportsPaginatedHistory
+          ? { threadId: chatId, limit: 20, sortDirection: "desc", itemsView: "full", ...(cursor ? { cursor } : {}) }
+          : { threadId: chatId, includeTurns: true }));
+      const turns = this.rpc.supportsPaginatedHistory ? response.data : object(response.thread).turns;
+      const newestFirst = Array.isArray(turns) ? (this.rpc.supportsPaginatedHistory ? turns : [...turns].reverse()) : [];
+      for (const rawTurn of newestFirst) {
+        const id = object(rawTurn).id;
+        if (typeof id !== "string" || (turnId !== undefined && id !== turnId)) continue;
+        // History order, not cache insertion time, determines the latest change.
+        // Checking membership also prevents downloading a reverted/foreign turn.
+        const live = this.store.getDiff(chatId, id);
+        if (live?.diff.trim()) return { ...live, source: "live" };
+        const recorded = recordedTurnDiff(rawTurn, chat.cwd);
+        if (recorded) return recorded;
+        if (turnId !== undefined) return null;
+      }
+      cursor = this.rpc.supportsPaginatedHistory && typeof response.nextCursor === "string" ? response.nextCursor : null;
+      if (cursor && visited.has(cursor)) throw new Error("Codex returned a repeated history cursor");
+      if (cursor) visited.add(cursor);
+    } while (cursor);
+    return null;
   }
 
   private async readTurns(chatId: string, limit: number): Promise<unknown[]> {

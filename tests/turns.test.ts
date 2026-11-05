@@ -12,6 +12,9 @@ import type { OutputCoalescer } from "../src/output.js";
 import type { ApprovalCoordinator } from "../src/approvals.js";
 
 const cleanups: (() => void)[] = [];
+function editedTurn(id: string) {
+  return { id, status: "completed", items: [{ type: "fileChange", status: "completed", changes: [{ path: "test.txt", kind: { type: "update" }, diff: "@@ -1 +1 @@\n-old\n+new\n" }] }] };
+}
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); });
 function fixture() {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "turn-concurrency-")));
@@ -24,6 +27,57 @@ function fixture() {
   cleanups.push(() => { store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
   return { store, turns, rpc };
 }
+
+it("loads the latest desktop-owned changes from history with an empty bot cache", async () => {
+  const { turns, rpc, store } = fixture();
+  Object.assign(rpc, { supportsPaginatedHistory: true });
+  rpc.request.mockResolvedValue({ data: [{ id: "latest-no-edits", items: [] }, editedTurn("edited")], nextCursor: null });
+  const diff = await turns.diff("a");
+  expect(diff).toMatchObject({ turnId: "edited", source: "history" });
+  expect(diff?.diff).toContain("+new");
+  expect(store.latestDiff("a")).toBeNull();
+  expect(rpc.request).toHaveBeenCalledExactlyOnceWith("thread/turns/list", { threadId: "a", limit: 20, sortDirection: "desc", itemsView: "full" });
+});
+
+it("pages older history and downloads the requested turn instead of the latest", async () => {
+  const { turns, rpc } = fixture();
+  Object.assign(rpc, { supportsPaginatedHistory: true });
+  rpc.request.mockImplementation(async (_method, params) => (params as { cursor?: string }).cursor
+    ? { data: [editedTurn("older")], nextCursor: null }
+    : { data: [editedTurn("newer")], nextCursor: "older-page" });
+  expect((await turns.diff("a", "older"))?.turnId).toBe("older");
+  expect(rpc.request).toHaveBeenLastCalledWith("thread/turns/list", expect.objectContaining({ threadId: "a", cursor: "older-page" }));
+  expect(await turns.diff("a", "foreign-turn")).toBeNull();
+  await expect(turns.diff("unknown-chat")).rejects.toThrow("not indexed");
+});
+
+it("finds older edits when recent pages only contain conversation", async () => {
+  const { turns, rpc } = fixture();
+  Object.assign(rpc, { supportsPaginatedHistory: true });
+  rpc.request.mockResolvedValueOnce({ data: [{ id: "discussion", items: [] }], nextCursor: "next" })
+    .mockResolvedValueOnce({ data: [editedTurn("older")], nextCursor: null });
+  expect((await turns.diff("a"))?.turnId).toBe("older");
+});
+
+it("supports legacy history and prefers a matching live diff without reviving removed turns", async () => {
+  const { turns, rpc, store } = fixture();
+  store.replaceDiff("a", "removed", "stale");
+  rpc.request.mockResolvedValue({ thread: { turns: [editedTurn("old"), editedTurn("new")] } });
+  expect((await turns.diff("a"))?.turnId).toBe("new");
+  expect(await turns.diff("a", "removed")).toBeNull();
+  store.replaceDiff("a", "new", "aggregated live diff");
+  expect(await turns.diff("a")).toEqual({ turnId: "new", diff: "aggregated live diff", source: "live" });
+  expect(rpc.request).toHaveBeenLastCalledWith("thread/read", { threadId: "a", includeTurns: true });
+});
+
+it("does not misreport a history error as an empty diff or loop on a bad cursor", async () => {
+  const { turns, rpc } = fixture();
+  Object.assign(rpc, { supportsPaginatedHistory: true });
+  rpc.request.mockRejectedValueOnce(new Error("unavailable"));
+  await expect(turns.diff("a")).rejects.toThrow("unavailable");
+  rpc.request.mockResolvedValue({ data: [], nextCursor: "repeated" });
+  await expect(turns.diff("a")).rejects.toThrow("repeated history cursor");
+});
 
 it("reserves capacity while turn/start is awaiting acknowledgement", async () => {
   const { turns, rpc, store } = fixture();
