@@ -19,6 +19,12 @@ const schema = z.object({
   logLevel: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
   approvalExpiryMs: z.coerce.number().int().min(30_000).max(3_600_000).default(600_000),
   childEnvAllowlist: z.array(z.string()).default([]),
+  miniAppPort: z.coerce.number().int().min(1024).max(65535).default(8787),
+  miniAppTunnelBin: z.string().min(1).optional(),
+  miniAppUrl: z.string().url().refine((value) => {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash;
+  }, "Mini App URL must be an HTTPS origin without a path, query, or credentials").optional(),
 });
 
 export type Config = z.infer<typeof schema>;
@@ -41,6 +47,9 @@ function tomlConfig(filename: string | undefined): Record<string, unknown> {
     projectDiscoveryDepth: parsed.project_discovery_depth,
     maxConcurrentTurns: parsed.max_concurrent_turns,
     logLevel: parsed.log_level,
+    miniAppPort: parsed.mini_app_port,
+    miniAppTunnelBin: parsed.mini_app_tunnel_bin,
+    miniAppUrl: parsed.mini_app_url,
   };
 }
 
@@ -62,6 +71,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     logLevel: env.LOG_LEVEL ?? file.logLevel,
     approvalExpiryMs: env.APPROVAL_EXPIRY_MS,
     childEnvAllowlist: list(env.CODEX_CHILD_ENV_ALLOWLIST),
+    miniAppPort: env.MINI_APP_PORT ?? file.miniAppPort,
+    miniAppTunnelBin: env.MINI_APP_TUNNEL_BIN ?? file.miniAppTunnelBin,
+    miniAppUrl: env.MINI_APP_URL ?? file.miniAppUrl,
   });
 
   if (process.getuid?.() === 0) throw new Error("Refusing to run as root");

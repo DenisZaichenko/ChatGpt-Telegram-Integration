@@ -38,7 +38,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     codexBin: executable,
     dataDir: dir,
     projectRoots: [], projectParentDirs: [], projectAliases: {}, projectDiscoveryDepth: 1,
-    maxConcurrentTurns: 3, maxQueuedPromptsPerChat: 5, logLevel: "silent", approvalExpiryMs: 600_000, childEnvAllowlist: [],
+    maxConcurrentTurns: 3, maxQueuedPromptsPerChat: 5, logLevel: "silent", approvalExpiryMs: 600_000, childEnvAllowlist: [], miniAppPort: 8787,
   } satisfies Config;
   return { config, transcript };
 }

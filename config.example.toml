@@ -8,6 +8,10 @@ project_parent_dirs = ["/Users/me/IdeaProjects"]
 project_discovery_depth = 1
 max_concurrent_turns = 3
 log_level = "info"
+# Optional Mini App: choose a stable HTTPS origin OR a temporary tunnel binary.
+# mini_app_url = "https://your-domain.example"
+# mini_app_tunnel_bin = "/opt/homebrew/bin/cloudflared"
+# mini_app_port = 8787
 
 [project_aliases]
 project-a = "/Users/me/project-a"

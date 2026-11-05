@@ -248,6 +248,13 @@ export class StateStore {
         offered_at INTEGER,
         PRIMARY KEY(chat_id, turn_id)
       );
+
+      CREATE TABLE IF NOT EXISTS mini_app_submissions (
+        request_key TEXT PRIMARY KEY,
+        fingerprint TEXT NOT NULL,
+        disposition TEXT,
+        created_at INTEGER NOT NULL
+      );
     `);
     this.db.exec(`INSERT OR IGNORE INTO prompt_queue_positions(prompt_id,position) SELECT id,id FROM prompt_queue;`);
   }
@@ -549,6 +556,28 @@ export class StateStore {
     return rows.map((row) => ({ chatId: row.chat_id, turnId: row.turn_id, body: row.prompt_body, createdAt: row.created_at, offeredAt: row.offered_at }));
   }
 
+  recoveryPromptsForChat(chatId: string): RecoveryPrompt[] {
+    const rows = this.db.prepare(`SELECT r.turn_id FROM turn_recovery r JOIN turns t ON t.chat_id=r.chat_id AND t.turn_id=r.turn_id
+      WHERE r.chat_id=? AND t.state IN ('failed','interrupted','unknown') ORDER BY r.created_at`).all(chatId) as { turn_id: string }[];
+    return rows.map((row) => this.recoveryPrompt(chatId, row.turn_id)!);
+  }
+
+  claimMiniAppSubmission(key: string, fingerprint: string): { fresh: boolean; fingerprint: string; disposition: string | null } {
+    return this.db.transaction(() => {
+      const fresh = this.db.prepare("INSERT OR IGNORE INTO mini_app_submissions(request_key,fingerprint,created_at) VALUES (?,?,?)").run(key, fingerprint, Date.now()).changes > 0;
+      const row = this.db.prepare("SELECT fingerprint,disposition FROM mini_app_submissions WHERE request_key=?").get(key) as { fingerprint: string; disposition: string | null };
+      return { fresh, ...row };
+    })();
+  }
+
+  finishMiniAppSubmission(key: string, disposition: string): void {
+    this.db.prepare("UPDATE mini_app_submissions SET disposition=? WHERE request_key=?").run(disposition, key);
+  }
+
+  releaseMiniAppSubmission(key: string): void {
+    this.db.prepare("DELETE FROM mini_app_submissions WHERE request_key=? AND disposition IS NULL").run(key);
+  }
+
   markRecoveryOffered(chatId: string, turnId: string): void { this.db.prepare("UPDATE turn_recovery SET offered_at=? WHERE chat_id=? AND turn_id=?").run(Date.now(), chatId, turnId); }
   clearRecoveryPrompt(chatId: string, turnId: string): void { this.db.prepare("DELETE FROM turn_recovery WHERE chat_id=? AND turn_id=?").run(chatId, turnId); }
 
@@ -609,6 +638,7 @@ export class StateStore {
 
   prune(): void {
     const weekAgo = Date.now() - 7 * 86_400_000;
+    this.db.prepare("DELETE FROM mini_app_submissions WHERE created_at<?").run(weekAgo);
     this.db.prepare("DELETE FROM diffs WHERE updated_at<?").run(weekAgo);
     this.db.prepare(`DELETE FROM diffs WHERE rowid IN (SELECT rowid FROM diffs ORDER BY updated_at DESC LIMIT -1 OFFSET 10)`).run();
     this.db.prepare("DELETE FROM outbox WHERE delivered_at IS NOT NULL AND delivered_at<?").run(Date.now() - 86_400_000);
